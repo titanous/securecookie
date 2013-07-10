@@ -5,9 +5,6 @@
 package securecookie
 
 import (
-	"crypto/aes"
-	"crypto/hmac"
-	"crypto/sha256"
 	"strings"
 	"testing"
 )
@@ -32,61 +29,16 @@ func TestSecureCookie(t *testing.T) {
 			t.Error(err1)
 			continue
 		}
-		v, err2 := s1.Decode("sid", encoded)
+		v, err2 := s1.Decode("sid", encoded, nil)
 		if err2 != nil {
 			t.Fatalf("%v: %v", err2, encoded)
 		}
 		if string(v) != string(value) {
 			t.Fatalf("Expected %v, got %v.", string(value), string(v))
 		}
-		_, err3 := s2.Decode("sid", encoded)
+		_, err3 := s2.Decode("sid", encoded, nil)
 		if err3 == nil {
 			t.Fatalf("Expected failure decoding.")
-		}
-	}
-}
-
-func TestAuthentication(t *testing.T) {
-	hash := hmac.New(sha256.New, []byte("secret-key"))
-	for _, value := range testStrings {
-		hash.Reset()
-		signed := createMac(hash, []byte(value))
-		hash.Reset()
-		err := verifyMac(hash, []byte(value), signed)
-		if err != nil {
-			t.Error(err)
-		}
-	}
-}
-
-func TestEncryption(t *testing.T) {
-	block, err := aes.NewCipher([]byte("1234567890123456"))
-	if err != nil {
-		t.Fatalf("Block could not be created")
-	}
-	var encrypted, decrypted []byte
-	for _, value := range testStrings {
-		if encrypted, err = encrypt(block, []byte(value)); err != nil {
-			t.Error(err)
-		} else {
-			if decrypted, err = decrypt(block, encrypted); err != nil {
-				t.Error(err)
-			}
-			if string(decrypted) != value {
-				t.Errorf("Expected %v, got %v.", value, string(decrypted))
-			}
-		}
-	}
-}
-
-func TestEncoding(t *testing.T) {
-	for _, value := range testStrings {
-		encoded := encode([]byte(value))
-		decoded, err := decode(encoded)
-		if err != nil {
-			t.Error(err)
-		} else if string(decoded) != value {
-			t.Errorf("Expected %v, got %s.", value, string(decoded))
 		}
 	}
 }

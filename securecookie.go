@@ -5,26 +5,24 @@
 package securecookie
 
 import (
-	"bytes"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
-	"crypto/subtle"
 	"encoding/base64"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"hash"
 	"io"
-	"strconv"
 	"time"
 )
 
 // Codec defines an interface to encode and decode cookie values.
 type Codec interface {
 	Encode(name string, value []byte) (string, error)
-	Decode(name, value string) ([]byte, error)
+	Decode(name, value string, minTs *time.Time) ([]byte, error)
 }
 
 // New returns a new SecureCookie.
@@ -41,7 +39,7 @@ func New(hashKey, blockKey []byte) *SecureCookie {
 		hashKey:   hashKey,
 		blockKey:  blockKey,
 		hashFunc:  sha256.New,
-		maxAge:    86400 * 30,
+		hashSize:  sha256.Size,
 		maxLength: 4096,
 	}
 	if hashKey == nil {
@@ -58,11 +56,10 @@ func New(hashKey, blockKey []byte) *SecureCookie {
 type SecureCookie struct {
 	hashKey   []byte
 	hashFunc  func() hash.Hash
+	hashSize  int
 	blockKey  []byte
 	block     cipher.Block
 	maxLength int
-	maxAge    int64
-	minAge    int64
 	err       error
 	// For testing purposes, the function that returns the current timestamp.
 	// If not set, it will use time.Now().UTC().Unix().
@@ -77,27 +74,12 @@ func (s *SecureCookie) MaxLength(value int) *SecureCookie {
 	return s
 }
 
-// MaxAge restricts the maximum age, in seconds, for the cookie value.
-//
-// Default is 86400 * 30. Set it to 0 for no restriction.
-func (s *SecureCookie) MaxAge(value int) *SecureCookie {
-	s.maxAge = int64(value)
-	return s
-}
-
-// MinAge restricts the minimum age, in seconds, for the cookie value.
-//
-// Default is 0 (no restriction).
-func (s *SecureCookie) MinAge(value int) *SecureCookie {
-	s.minAge = int64(value)
-	return s
-}
-
 // HashFunc sets the hash function used to create HMAC.
 //
 // Default is crypto/sha256.New.
 func (s *SecureCookie) HashFunc(f func() hash.Hash) *SecureCookie {
 	s.hashFunc = f
+	s.hashSize = f().Size()
 	return s
 }
 
@@ -128,26 +110,39 @@ func (s *SecureCookie) Encode(name string, value []byte) (string, error) {
 		return "", s.err
 	}
 	var err error
-	// 2. Encrypt (optional).
+	// Encrypt (optional).
 	if s.block != nil {
 		if value, err = encrypt(s.block, value); err != nil {
 			return "", err
 		}
 	}
+
+	// Create value and MAC
+	value = encodeValue(s.timestamp(), value, s.hashSize)
+	h := hmac.New(s.hashFunc, s.hashKey)
+	h.Write(value)
+	value = h.Sum(value)
+	// Encode to base64.
 	value = encode(value)
-	// 3. Create MAC for "name|date|value". Extra pipe to be used later.
-	value = []byte(fmt.Sprintf("%s|%d|%s|", name, s.timestamp(), value))
-	mac := createMac(hmac.New(s.hashFunc, s.hashKey), value[:len(value)-1])
-	// Append mac, remove name.
-	value = append(value, mac...)[len(name)+1:]
-	// 4. Encode to base64.
-	value = encode(value)
-	// 5. Check length.
+	// Check length.
 	if s.maxLength != 0 && len(value) > s.maxLength {
 		return "", errors.New("securecookie: the value is too long")
 	}
 	// Done.
 	return string(value), nil
+}
+
+func encodeValue(ts int64, value []byte, hashSize int) []byte {
+	// ts int64, value, hmac
+	val := make([]byte, 8+len(value), 8+len(value)+hashSize)
+	binary.BigEndian.PutUint64(val, uint64(ts))
+	copy(val[8:], value)
+	return val
+}
+
+func decodeValue(value []byte) (int64, []byte) {
+	t := binary.BigEndian.Uint64(value)
+	return int64(t), value[8:]
 }
 
 // Decode decodes a cookie value.
@@ -158,7 +153,7 @@ func (s *SecureCookie) Encode(name string, value []byte) (string, error) {
 // The name argument is the cookie name. It must be the same name used when
 // it was stored. The value argument is the encoded cookie value. The dst
 // argument is where the cookie will be decoded. It must be a pointer.
-func (s *SecureCookie) Decode(name, value string) ([]byte, error) {
+func (s *SecureCookie) Decode(name, value string, minTs *time.Time) ([]byte, error) {
 	if s.err != nil {
 		return nil, s.err
 	}
@@ -166,41 +161,27 @@ func (s *SecureCookie) Decode(name, value string) ([]byte, error) {
 		s.err = errors.New("securecookie: hash key is not set")
 		return nil, s.err
 	}
-	// 1. Check length.
+	// Check length.
 	if s.maxLength != 0 && len(value) > s.maxLength {
 		return nil, errors.New("securecookie: the value is too long")
 	}
-	// 2. Decode from base64.
+	// Decode from base64.
 	b, err := decode([]byte(value))
 	if err != nil {
 		return nil, err
 	}
-	// 3. Verify MAC. Value is "date|value|mac".
-	parts := bytes.SplitN(b, []byte("|"), 3)
-	if len(parts) != 3 {
-		return nil, errors.New("securecookie: invalid value %v")
-	}
-	h := hmac.New(s.hashFunc, s.hashKey)
-	b = append([]byte(name+"|"), b[:len(b)-len(parts[2])-1]...)
-	if err = verifyMac(h, b, parts[2]); err != nil {
+	// Verify MAC.
+	mac := b[len(b)-s.hashSize:]
+	b = b[:len(b)-s.hashSize]
+	if err = verifyMac(hmac.New(s.hashFunc, s.hashKey), mac, b); err != nil {
 		return nil, err
 	}
-	// 4. Verify date ranges.
-	var t1 int64
-	if t1, err = strconv.ParseInt(string(parts[0]), 10, 64); err != nil {
-		return nil, errors.New("securecookie: invalid timestamp")
-	}
-	t2 := s.timestamp()
-	if s.minAge != 0 && t1 > t2-s.minAge {
-		return nil, errors.New("securecookie: timestamp is too new")
-	}
-	if s.maxAge != 0 && t1 < t2-s.maxAge {
+	// Verify date ranges.
+	var t int64
+	t, b = decodeValue(b)
+	ts := time.Unix(0, t)
+	if minTs != nil && ts.Before(*minTs) {
 		return nil, errors.New("securecookie: expired timestamp")
-	}
-	// 5. Decrypt (optional).
-	b, err = decode(parts[1])
-	if err != nil {
-		return nil, err
 	}
 	if s.block != nil {
 		if b, err = decrypt(s.block, b); err != nil {
@@ -217,23 +198,15 @@ func (s *SecureCookie) Decode(name, value string) ([]byte, error) {
 // overridden. If not set, it will return time.Now().UTC().Unix().
 func (s *SecureCookie) timestamp() int64 {
 	if s.timeFunc == nil {
-		return time.Now().UTC().Unix()
+		return time.Now().UTC().UnixNano()
 	}
 	return s.timeFunc()
 }
 
-// Authentication -------------------------------------------------------------
-
-// createMac creates a message authentication code (MAC).
-func createMac(h hash.Hash, value []byte) []byte {
-	h.Write(value)
-	return h.Sum(nil)
-}
-
 // verifyMac verifies that a message authentication code (MAC) is valid.
-func verifyMac(h hash.Hash, value []byte, mac []byte) error {
-	mac2 := createMac(h, value)
-	if len(mac) == len(mac2) && subtle.ConstantTimeCompare(mac, mac2) == 1 {
+func verifyMac(h hash.Hash, mac []byte, value []byte) error {
+	h.Write(value)
+	if hmac.Equal(h.Sum(nil), mac) {
 		return nil
 	}
 	return errors.New("securecookie: the value is not valid")
@@ -342,10 +315,10 @@ func EncodeMulti(name string, value []byte, codecs ...Codec) (string, error) {
 //
 // The codecs are tried in order. Multiple codecs are accepted to allow
 // key rotation.
-func DecodeMulti(name string, value string, codecs ...Codec) ([]byte, error) {
+func DecodeMulti(name string, value string, minTs *time.Time, codecs ...Codec) ([]byte, error) {
 	var errors MultiError
 	for _, codec := range codecs {
-		if v, err := codec.Decode(name, value); err == nil {
+		if v, err := codec.Decode(name, value, minTs); err == nil {
 			return v, nil
 		} else {
 			errors = append(errors, err)
