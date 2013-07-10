@@ -8,8 +8,6 @@ import (
 	"crypto/aes"
 	"crypto/hmac"
 	"crypto/sha256"
-	"errors"
-	"fmt"
 	"strings"
 	"testing"
 )
@@ -22,25 +20,9 @@ var testCookies = []interface{}{
 var testStrings = []string{"foo", "bar", "baz"}
 
 func TestSecureCookie(t *testing.T) {
-	// TODO test too old / too new timestamps
-	compareMaps := func(m1, m2 map[string]interface{}) error {
-		if len(m1) != len(m2) {
-			return errors.New("different maps")
-		}
-		for k, v := range m1 {
-			if m2[k] != v {
-				return fmt.Errorf("Different value for key %v: expected %v, got %v", k, m2[k], v)
-			}
-		}
-		return nil
-	}
-
 	s1 := New([]byte("12345"), []byte("1234567890123456"))
 	s2 := New([]byte("54321"), []byte("6543210987654321"))
-	value := map[string]interface{}{
-		"foo": "bar",
-		"baz": 128,
-	}
+	value := []byte("foobar")
 
 	for i := 0; i < 50; i++ {
 		// Running this multiple times to check if any special character
@@ -50,16 +32,14 @@ func TestSecureCookie(t *testing.T) {
 			t.Error(err1)
 			continue
 		}
-		dst := make(map[string]interface{})
-		err2 := s1.Decode("sid", encoded, &dst)
+		v, err2 := s1.Decode("sid", encoded)
 		if err2 != nil {
 			t.Fatalf("%v: %v", err2, encoded)
 		}
-		if err := compareMaps(dst, value); err != nil {
-			t.Fatalf("Expected %v, got %v.", value, dst)
+		if string(v) != string(value) {
+			t.Fatalf("Expected %v, got %v.", string(value), string(v))
 		}
-		dst2 := make(map[string]interface{})
-		err3 := s2.Decode("sid", encoded, &dst2)
+		_, err3 := s2.Decode("sid", encoded)
 		if err3 == nil {
 			t.Fatalf("Expected failure decoding.")
 		}
@@ -99,27 +79,6 @@ func TestEncription(t *testing.T) {
 	}
 }
 
-func TestSerialization(t *testing.T) {
-	var (
-		serialized   []byte
-		deserialized map[string]string
-		err          error
-	)
-	for _, value := range testCookies {
-		if serialized, err = serialize(value); err != nil {
-			t.Error(err)
-		} else {
-			deserialized = make(map[string]string)
-			if err = deserialize(serialized, &deserialized); err != nil {
-				t.Error(err)
-			}
-			if fmt.Sprintf("%v", deserialized) != fmt.Sprintf("%v", value) {
-				t.Errorf("Expected %v, got %v.", value, deserialized)
-			}
-		}
-	}
-}
-
 func TestEncoding(t *testing.T) {
 	for _, value := range testStrings {
 		encoded := encode([]byte(value))
@@ -134,32 +93,12 @@ func TestEncoding(t *testing.T) {
 
 func TestMultiError(t *testing.T) {
 	s1, s2 := New(nil, nil), New(nil, nil)
-	_, err := EncodeMulti("sid", "value", s1, s2)
+	_, err := EncodeMulti("sid", []byte("value"), s1, s2)
 	if len(err.(MultiError)) != 2 {
 		t.Errorf("Expected 2 errors, got %s.", err)
 	} else {
 		if strings.Index(err.Error(), "hash key is not set") == -1 {
 			t.Errorf("Expected missing hash key error, got %s.", err.Error())
 		}
-	}
-}
-
-// ----------------------------------------------------------------------------
-
-type FooBar struct {
-	Foo int
-	Bar string
-}
-
-func TestCustomType(t *testing.T) {
-	s1 := New([]byte("12345"), []byte("1234567890123456"))
-	// Type is not registered in gob. (!!!)
-	src := &FooBar{42, "bar"}
-	encoded, _ := s1.Encode("sid", src)
-
-	dst := &FooBar{}
-	_ = s1.Decode("sid", encoded, dst)
-	if dst.Foo != 42 || dst.Bar != "bar" {
-		t.Fatalf("Expected %#v, got %#v", src, dst)
 	}
 }

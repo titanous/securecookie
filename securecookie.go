@@ -13,7 +13,6 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
-	"encoding/gob"
 	"errors"
 	"fmt"
 	"hash"
@@ -24,8 +23,8 @@ import (
 
 // Codec defines an interface to encode and decode cookie values.
 type Codec interface {
-	Encode(name string, value interface{}) (string, error)
-	Decode(name, value string, dst interface{}) error
+	Encode(name string, value []byte) (string, error)
+	Decode(name, value string) ([]byte, error)
 }
 
 // New returns a new SecureCookie.
@@ -120,12 +119,7 @@ func (s *SecureCookie) BlockFunc(f func([]byte) (cipher.Block, error)) *SecureCo
 //
 // It serializes, optionally encrypts, signs with a message authentication code, and
 // finally encodes the value.
-//
-// The name argument is the cookie name. It is stored with the encoded value.
-// The value argument is the value to be encoded. It can be any value that can
-// be encoded using encoding/gob. To store special structures, they must be
-// registered first using gob.Register().
-func (s *SecureCookie) Encode(name string, value interface{}) (string, error) {
+func (s *SecureCookie) Encode(name string, value []byte) (string, error) {
 	if s.err != nil {
 		return "", s.err
 	}
@@ -134,31 +128,26 @@ func (s *SecureCookie) Encode(name string, value interface{}) (string, error) {
 		return "", s.err
 	}
 	var err error
-	var b []byte
-	// 1. Serialize.
-	if b, err = serialize(value); err != nil {
-		return "", err
-	}
 	// 2. Encrypt (optional).
 	if s.block != nil {
-		if b, err = encrypt(s.block, b); err != nil {
+		if value, err = encrypt(s.block, value); err != nil {
 			return "", err
 		}
 	}
-	b = encode(b)
+	value = encode(value)
 	// 3. Create MAC for "name|date|value". Extra pipe to be used later.
-	b = []byte(fmt.Sprintf("%s|%d|%s|", name, s.timestamp(), b))
-	mac := createMac(hmac.New(s.hashFunc, s.hashKey), b[:len(b)-1])
+	value = []byte(fmt.Sprintf("%s|%d|%s|", name, s.timestamp(), value))
+	mac := createMac(hmac.New(s.hashFunc, s.hashKey), value[:len(value)-1])
 	// Append mac, remove name.
-	b = append(b, mac...)[len(name)+1:]
+	value = append(value, mac...)[len(name)+1:]
 	// 4. Encode to base64.
-	b = encode(b)
+	value = encode(value)
 	// 5. Check length.
-	if s.maxLength != 0 && len(b) > s.maxLength {
+	if s.maxLength != 0 && len(value) > s.maxLength {
 		return "", errors.New("securecookie: the value is too long")
 	}
 	// Done.
-	return string(b), nil
+	return string(value), nil
 }
 
 // Decode decodes a cookie value.
@@ -169,61 +158,57 @@ func (s *SecureCookie) Encode(name string, value interface{}) (string, error) {
 // The name argument is the cookie name. It must be the same name used when
 // it was stored. The value argument is the encoded cookie value. The dst
 // argument is where the cookie will be decoded. It must be a pointer.
-func (s *SecureCookie) Decode(name, value string, dst interface{}) error {
+func (s *SecureCookie) Decode(name, value string) ([]byte, error) {
 	if s.err != nil {
-		return s.err
+		return nil, s.err
 	}
 	if s.hashKey == nil {
 		s.err = errors.New("securecookie: hash key is not set")
-		return s.err
+		return nil, s.err
 	}
 	// 1. Check length.
 	if s.maxLength != 0 && len(value) > s.maxLength {
-		return errors.New("securecookie: the value is too long")
+		return nil, errors.New("securecookie: the value is too long")
 	}
 	// 2. Decode from base64.
 	b, err := decode([]byte(value))
 	if err != nil {
-		return err
+		return nil, err
 	}
 	// 3. Verify MAC. Value is "date|value|mac".
 	parts := bytes.SplitN(b, []byte("|"), 3)
 	if len(parts) != 3 {
-		return errors.New("securecookie: invalid value %v")
+		return nil, errors.New("securecookie: invalid value %v")
 	}
 	h := hmac.New(s.hashFunc, s.hashKey)
 	b = append([]byte(name+"|"), b[:len(b)-len(parts[2])-1]...)
 	if err = verifyMac(h, b, parts[2]); err != nil {
-		return err
+		return nil, err
 	}
 	// 4. Verify date ranges.
 	var t1 int64
 	if t1, err = strconv.ParseInt(string(parts[0]), 10, 64); err != nil {
-		return errors.New("securecookie: invalid timestamp")
+		return nil, errors.New("securecookie: invalid timestamp")
 	}
 	t2 := s.timestamp()
 	if s.minAge != 0 && t1 > t2-s.minAge {
-		return errors.New("securecookie: timestamp is too new")
+		return nil, errors.New("securecookie: timestamp is too new")
 	}
 	if s.maxAge != 0 && t1 < t2-s.maxAge {
-		return errors.New("securecookie: expired timestamp")
+		return nil, errors.New("securecookie: expired timestamp")
 	}
 	// 5. Decrypt (optional).
 	b, err = decode(parts[1])
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if s.block != nil {
 		if b, err = decrypt(s.block, b); err != nil {
-			return err
+			return nil, err
 		}
 	}
-	// 6. Deserialize.
-	if err = deserialize(b, dst); err != nil {
-		return err
-	}
 	// Done.
-	return nil
+	return b, nil
 }
 
 // timestamp returns the current timestamp, in seconds.
@@ -267,9 +252,10 @@ func encrypt(block cipher.Block, value []byte) ([]byte, error) {
 	}
 	// Encrypt it.
 	stream := cipher.NewCTR(block, iv)
-	stream.XORKeyStream(value, value)
+	dst := make([]byte, len(value))
+	stream.XORKeyStream(dst, value)
 	// Return iv + ciphertext.
-	return append(iv, value...), nil
+	return append(iv, dst...), nil
 }
 
 // decrypt decrypts a value using the given block in counter mode.
@@ -289,27 +275,6 @@ func decrypt(block cipher.Block, value []byte) ([]byte, error) {
 		return value, nil
 	}
 	return nil, errors.New("securecookie: the value could not be decrypted")
-}
-
-// Serialization --------------------------------------------------------------
-
-// serialize encodes a value using gob.
-func serialize(src interface{}) ([]byte, error) {
-	buf := new(bytes.Buffer)
-	enc := gob.NewEncoder(buf)
-	if err := enc.Encode(src); err != nil {
-		return nil, err
-	}
-	return buf.Bytes(), nil
-}
-
-// deserialize decodes a value using gob.
-func deserialize(src []byte, dst interface{}) error {
-	dec := gob.NewDecoder(bytes.NewBuffer(src))
-	if err := dec.Decode(dst); err != nil {
-		return err
-	}
-	return nil
 }
 
 // Encoding -------------------------------------------------------------------
@@ -361,8 +326,7 @@ func CodecsFromPairs(keyPairs ...[]byte) []Codec {
 //
 // The codecs are tried in order. Multiple codecs are accepted to allow
 // key rotation.
-func EncodeMulti(name string, value interface{},
-	codecs ...Codec) (string, error) {
+func EncodeMulti(name string, value []byte, codecs ...Codec) (string, error) {
 	var errors MultiError
 	for _, codec := range codecs {
 		if encoded, err := codec.Encode(name, value); err == nil {
@@ -378,17 +342,16 @@ func EncodeMulti(name string, value interface{},
 //
 // The codecs are tried in order. Multiple codecs are accepted to allow
 // key rotation.
-func DecodeMulti(name string, value string, dst interface{},
-	codecs ...Codec) error {
+func DecodeMulti(name string, value string, codecs ...Codec) ([]byte, error) {
 	var errors MultiError
 	for _, codec := range codecs {
-		if err := codec.Decode(name, value, dst); err == nil {
-			return nil
+		if v, err := codec.Decode(name, value); err == nil {
+			return v, nil
 		} else {
 			errors = append(errors, err)
 		}
 	}
-	return errors
+	return nil, errors
 }
 
 // MultiError groups multiple errors.
