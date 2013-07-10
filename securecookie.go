@@ -180,7 +180,7 @@ func (s *SecureCookie) Decode(name, value string, minTs *time.Time) ([]byte, err
 	var t int64
 	t, b = decodeValue(b)
 	ts := time.Unix(0, t)
-	if minTs != nil && ts.Before(*minTs) {
+	if minTs != nil && ts.Before(minTs.Truncate(time.Second)) {
 		return nil, errors.New("securecookie: expired timestamp")
 	}
 	if s.block != nil {
@@ -198,7 +198,7 @@ func (s *SecureCookie) Decode(name, value string, minTs *time.Time) ([]byte, err
 // overridden. If not set, it will return time.Now().UTC().Unix().
 func (s *SecureCookie) timestamp() int64 {
 	if s.timeFunc == nil {
-		return time.Now().UTC().UnixNano()
+		return time.Now().UTC().Unix()
 	}
 	return s.timeFunc()
 }
