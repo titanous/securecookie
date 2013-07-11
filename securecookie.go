@@ -22,7 +22,7 @@ import (
 // Codec defines an interface to encode and decode cookie values.
 type Codec interface {
 	Encode(name string, value []byte) (string, error)
-	Decode(name, value string, minTs *time.Time) ([]byte, error)
+	Decode(name, value string) ([]byte, time.Time, error)
 }
 
 // New returns a new SecureCookie.
@@ -153,43 +153,37 @@ func decodeValue(value []byte) (int64, []byte) {
 // The name argument is the cookie name. It must be the same name used when
 // it was stored. The value argument is the encoded cookie value. The dst
 // argument is where the cookie will be decoded. It must be a pointer.
-func (s *SecureCookie) Decode(name, value string, minTs *time.Time) ([]byte, error) {
+func (s *SecureCookie) Decode(name, value string) ([]byte, time.Time, error) {
 	if s.err != nil {
-		return nil, s.err
+		return nil, time.Time{}, s.err
 	}
 	if s.hashKey == nil {
 		s.err = errors.New("securecookie: hash key is not set")
-		return nil, s.err
+		return nil, time.Time{}, s.err
 	}
 	// Check length.
 	if s.maxLength != 0 && len(value) > s.maxLength {
-		return nil, errors.New("securecookie: the value is too long")
+		return nil, time.Time{}, errors.New("securecookie: the value is too long")
 	}
 	// Decode from base64.
 	b, err := decode([]byte(value))
 	if err != nil {
-		return nil, err
+		return nil, time.Time{}, err
 	}
 	// Verify MAC.
 	mac := b[len(b)-s.hashSize:]
 	b = b[:len(b)-s.hashSize]
 	if err = verifyMac(hmac.New(s.hashFunc, s.hashKey), mac, b); err != nil {
-		return nil, err
+		return nil, time.Time{}, err
 	}
-	// Verify date ranges.
-	var t int64
-	t, b = decodeValue(b)
-	ts := time.Unix(0, t)
-	if minTs != nil && ts.Before(minTs.Truncate(time.Second)) {
-		return nil, errors.New("securecookie: expired timestamp")
-	}
+	t, b := decodeValue(b)
 	if s.block != nil {
 		if b, err = decrypt(s.block, b); err != nil {
-			return nil, err
+			return nil, time.Time{}, err
 		}
 	}
 	// Done.
-	return b, nil
+	return b, time.Unix(0, t), nil
 }
 
 // timestamp returns the current timestamp, in seconds.
@@ -315,16 +309,16 @@ func EncodeMulti(name string, value []byte, codecs ...Codec) (string, error) {
 //
 // The codecs are tried in order. Multiple codecs are accepted to allow
 // key rotation.
-func DecodeMulti(name string, value string, minTs *time.Time, codecs ...Codec) ([]byte, error) {
+func DecodeMulti(name string, value string, codecs ...Codec) ([]byte, time.Time, error) {
 	var errors MultiError
 	for _, codec := range codecs {
-		if v, err := codec.Decode(name, value, minTs); err == nil {
-			return v, nil
+		if v, t, err := codec.Decode(name, value); err == nil {
+			return v, t, nil
 		} else {
 			errors = append(errors, err)
 		}
 	}
-	return nil, errors
+	return nil, time.Time{}, errors
 }
 
 // MultiError groups multiple errors.

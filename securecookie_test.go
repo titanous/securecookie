@@ -29,14 +29,17 @@ func TestSecureCookie(t *testing.T) {
 			t.Error(err1)
 			continue
 		}
-		v, err2 := s1.Decode("sid", encoded, nil)
+		v, ts, err2 := s1.Decode("sid", encoded)
 		if err2 != nil {
 			t.Fatalf("%v: %v", err2, encoded)
 		}
 		if string(v) != string(value) {
 			t.Fatalf("Expected %v, got %v.", string(value), string(v))
 		}
-		_, err3 := s2.Decode("sid", encoded, nil)
+		if ts.IsZero() {
+			t.Fatalf("Expected time")
+		}
+		_, _, err3 := s2.Decode("sid", encoded)
 		if err3 == nil {
 			t.Fatalf("Expected failure decoding.")
 		}
