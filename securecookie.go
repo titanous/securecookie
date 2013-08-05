@@ -183,7 +183,7 @@ func (s *SecureCookie) Decode(name, value string) ([]byte, time.Time, error) {
 		}
 	}
 	// Done.
-	return b, time.Unix(0, t), nil
+	return b, time.Unix(t, 0), nil
 }
 
 // timestamp returns the current timestamp, in seconds.
